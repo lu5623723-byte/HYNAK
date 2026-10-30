@@ -1,0 +1,7 @@
+{$DOMAIN} {
+    reverse_proxy app:8000
+    request_body {
+        max_size 12MB
+    }
+    # Access logging deliberately omitted: confirmation tokens must not enter logs.
+}

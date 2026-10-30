@@ -1,0 +1,15 @@
+# Explicit public ACME issuer: Caddy's default IP certificate is locally trusted.
+# Requires an ACME-profile-capable Caddy, public 80/443 and persistent /data.
+https://{$DOMAIN} {
+    tls {
+        issuer acme {
+            dir https://acme-v02.api.letsencrypt.org/directory
+            profile shortlived
+        }
+    }
+    reverse_proxy app:8000
+    request_body {
+        max_size 12MB
+    }
+    # Do not enable access logs containing confirmation-token URLs.
+}

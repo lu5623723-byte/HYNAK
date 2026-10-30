@@ -1,0 +1,12 @@
+fastapi==0.162.0
+uvicorn==0.54.0
+SQLAlchemy==2.1.6
+Jinja2==3.1.6
+python-multipart==0.0.32
+starlette==1.10.0
+anyio==4.15.1
+openpyxl==3.1.5
+httpx==0.28.1
+pytest==9.2.0
+tzdata==2026.6
+psycopg[binary]==3.3.6

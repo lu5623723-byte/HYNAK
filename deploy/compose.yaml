@@ -1,0 +1,57 @@
+name: hynak
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://hynak:${DB_PASSWORD:?Set DB_PASSWORD in deploy/.env}@db/hynak
+      HYNAK_DATA_DIR: /data
+      PUBLIC_BASE_URL: https://${DOMAIN:?Set public hostname or IPv4 in deploy/.env}
+      SECURE_COOKIES: '1'
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      TZ: America/Sao_Paulo
+    volumes:
+      - private_files:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hynak
+      POSTGRES_DB: hynak
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/.env}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hynak"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set public hostname or IPv4 in deploy/.env}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ${CADDY_CONFIG:-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      app:
+        condition: service_healthy
+volumes:
+  private_files:
+  database:
+  caddy_data:

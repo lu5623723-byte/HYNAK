@@ -6,7 +6,8 @@ umask 077
 [[ $EUID -eq 0 ]] || { echo 'Run this script in the root Workbench terminal.' >&2; exit 1; }
 source_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 install_root=/opt/hynak
-public_host="${1:?Usage: bash deploy/install-aliyun.sh PUBLIC_IPV4}"
+public_host="${1:-47.106.123.56}"
+[[ "$public_host" == 47.106.123.56 ]] || { echo 'This deployment bundle targets 47.106.123.56.' >&2; exit 1; }
 . /etc/os-release
 [[ "$ID" == alinux && "${VERSION_ID%%.*}" == 3 && "$(uname -m)" == x86_64 ]] || {
     echo 'Expected Alibaba Cloud Linux 3 x86_64. No changes made.' >&2; exit 1;
@@ -98,8 +99,8 @@ from app.db import engine
 assert os.environ.get('HYNAK_TEST_MODE','0')!='1'
 assert engine.dialect.name=='postgresql'
 with engine.connect() as db:
-    assert db.scalar(text('SELECT max(version) FROM schema_versions'))==3
-print('PostgreSQL connection and schema version 3 verified.')
+    assert db.scalar(text('SELECT max(version) FROM schema_versions'))==10
+print('PostgreSQL connection and schema version 10 verified.')
 PY
 echo '[6/7] Creating and checking a consistent database/attachment backup'
 mkdir -p /var/backups/hynak
@@ -113,7 +114,7 @@ gzip -t "$latest_backup/attachments.tar.gz"
     docker compose exec -T db createdb -U hynak "$restore_db"
     trap 'docker compose exec -T db dropdb -U hynak "$restore_db"' EXIT
     docker compose exec -T db pg_restore -U hynak --exit-on-error --dbname="$restore_db" < "$latest_backup/database.dump"
-    docker compose exec -T db psql -U hynak -d "$restore_db" -Atc 'SELECT max(version) FROM schema_versions' | grep -qx 3
+    docker compose exec -T db psql -U hynak -d "$restore_db" -Atc 'SELECT max(version) FROM schema_versions' | grep -qx 10
 )
 echo 'Database restored successfully into a separate temporary verification database.'
 if [[ ! -e /etc/systemd/system/hynak-backup.service && ! -e /etc/systemd/system/hynak-backup.timer ]]; then
@@ -156,6 +157,21 @@ if [[ "$tls_ready" != 1 ]]; then
     echo 'Do not send deploy/.env or initialization tokens in screenshots.' >&2
     exit 1
 fi
+python3 - <<'PY'
+from pathlib import Path
+import os, tempfile
+p=Path('/root/.ssh/authorized_keys')
+if p.exists():
+    old=p.read_text()
+    key='AAAAC3NzaC1lZDI1NTE5AAAAIFs/IdNYwzyRYwtVfHMpRs8RJtnGIzUmR9GCYoVXkFuV'
+    new=''.join(line for line in old.splitlines(True) if key not in line)
+    if old!=new:
+        fd,name=tempfile.mkstemp(dir=str(p.parent))
+        with os.fdopen(fd,'w') as stream: stream.write(new)
+        os.chmod(name,0o600)
+        os.replace(name,p)
+        print('Removed the temporary HYNAK deployment public key.')
+PY
 docker compose ps
 echo "HYNAK server installation complete: https://$public_host/"
 echo 'Local trusted HTTPS verified. Public access and business acceptance still need verification.'

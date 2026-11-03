@@ -40,19 +40,21 @@ def test_dealer_cash_order_review_receipt_and_balance(env):
     oid,cid=r.json()['id'],r.json()['claim_id']
     d=e.data(e.dealer);o=d['orders'][0]
     # A submitted foreign dealer_id cannot place an order for another account.
-    assert o['dealer_id']==e.did and o['mode']=='SELF' and o['status']=='WAITING_INTERNAL_REVIEW'
+    assert o['dealer_id']==e.did and o['mode']=='SELF' and o['status']=='WAITING_FINANCE_REVIEW'
     assert o['sales_id']==e.sid and o['receivable']==0
     assert d['claims'][0]['status']=='PENDING' and d['metrics']['verified']==0
     assert e.dealer.get(f'/api/claims/{cid}/attachment').content==PROOF
-    e.review(oid)
-    assert e.data(e.dealer)['orders'][0]['status']=='CONFIRMED'
-    assert e.data(e.dealer)['orders'][0]['outstanding']==580000
+    e.act(e.admin,'order.review',dict(order_id=oid),expected=403)
     rid=e.act(e.finance,'receipt.create',dict(dealer_id=e.did,account_id=e.aid,claim_id=cid,amount='3000.00',date='2026-10-30',reference='DEALER-FLOW-BANK-REF'))['id']
-    assert e.data(e.dealer)['orders'][0]['outstanding']==580000
-    e.allocate(rid,[dict(order_id=oid,amount='3000.00')])
     d=e.data(e.dealer)
-    assert d['orders'][0]['received']==300000 and d['orders'][0]['outstanding']==280000
-    assert d['metrics']['verified']==300000 and d['claims'][0]['status']=='VERIFIED'
+    assert d['orders'][0]['status']=='WAITING_FINANCE_REVIEW' and d['orders'][0]['receivable']==0
+    additional=e.dealer.post('/api/claims',data=dict(order_id=oid,amount='2800.00',paid_date='2026-10-30',reference='ADDITIONAL'),files={'file':('additional.png',PROOF,'image/png')},headers={'X-CSRF-Token':e.data(e.dealer)['csrf']})
+    assert additional.status_code==200,additional.text
+    e.act(e.finance,'receipt.create',dict(dealer_id=e.did,account_id=e.aid,claim_id=additional.json()['id'],amount='2800.00',date='2026-10-30',reference='DEALER-FLOW-BANK-REF-2'))
+    d=e.data(e.dealer)
+    assert d['orders'][0]['status']=='CONFIRMED'
+    assert d['orders'][0]['received']==580000 and d['orders'][0]['outstanding']==0
+    assert d['metrics']['verified']==580000 and d['claims'][0]['status']=='VERIFIED'
     assert 'account_id' not in d['receipts'][0] and 'reference' not in d['receipts'][0]
     assert d['bank_accounts']==[] and d['audit']==[] and d['commissions']==[]
 
@@ -63,13 +65,13 @@ def test_administrator_consignment_and_dealer_sold_report(env):
     e.act(e.admin,'order.submit',{'order_id':oid});e.review(oid)
     token=e.act(e.admin,'order.token',{'order_id':oid})['token']
     assert e.dealer.post('/api/quote/'+token,json={'action':'CONFIRM'}).status_code==200
-    assert e.data(e.dealer)['orders'][0]['receivable']==0
+    assert e.data(e.dealer)['orders'][0]['receivable']==580000
     sid=e.ship(oid,consignment_location_id=e.cwid)
     e.act(e.warehouse,'shipment.action',dict(shipment_id=sid,action='DELIVER'))
     d=e.data(e.dealer);assert len(d['warehouses'])==1 and d['inventory'][0]['quantity']==1
-    report=e.act(e.dealer,'consignment.report',dict(warehouse_id=e.cwid,product_id=e.pid,quantity=1),key='dealer-consign-report')
-    again=e.act(e.dealer,'consignment.report',dict(warehouse_id=e.cwid,product_id=e.pid,quantity=1),key='dealer-consign-report')
-    assert report==again and e.data(e.dealer)['metrics']['receivable']==0
+    report=e.act(e.dealer,'consignment.report',dict(source_order_id=oid,warehouse_id=e.cwid,product_id=e.pid,quantity=1),key='dealer-consign-report')
+    again=e.act(e.dealer,'consignment.report',dict(source_order_id=oid,warehouse_id=e.cwid,product_id=e.pid,quantity=1),key='dealer-consign-report')
+    assert report==again and e.data(e.dealer)['metrics']['receivable']==580000
     e.act(e.admin,'consignment.confirm',dict(report_id=report['id'],due='2026-11-30'))
     d=e.data(e.dealer);assert d['metrics']['receivable']==580000
     assert next(i for i in d['inventory'] if i['product_id']==e.pid)['quantity']==0
@@ -88,12 +90,12 @@ def test_dealer_may_not_override_price_or_bypass_csrf(env):
     'followup.create','commission.approve','commission.pay','commission.adjust','import.commit',
 ])
 def test_dealer_cannot_execute_staff_operations(env,action):
-    e=env;oid=e.order()
+    e=env;oid=e.legacy_order()
     e.act(e.dealer,action,{'order_id':oid},expected=403)
 
 def test_dealer_export_and_attachment_object_isolation(env):
     e=env;own=create(e);assert own.status_code==200,own.text
-    other=e.order(e.dealer2);e.review(other)
+    other=e.legacy_order(e.dealer2);e.review(other)
     r=e.dealer2.post('/api/claims',data={'order_id':other,'amount':'100.00','paid_date':'2026-10-30','reference':'OTHER-PRIVATE-REF'},
                      files={'file':('other.pdf',PROOF,'application/pdf')},headers=headers(e.dealer2))
     assert r.status_code==200,r.text
@@ -109,7 +111,7 @@ def test_dealer_export_and_attachment_object_isolation(env):
     assert e.dealer.post('/api/backup',json={},headers=headers(e.dealer)).status_code==403
 
 def test_dealer_response_does_not_expose_internal_collection_or_commission(env):
-    e=env;oid=e.order();e.review(oid,commission_bps=500,reason='Internal commission override')
+    e=env;oid=e.legacy_order();e.review(oid,commission_bps=500,reason='Internal commission override')
     e.act(e.sales,'followup.create',dict(dealer_id=e.did,order_id=oid,note='INTERNAL_COLLECTION_NOTE',next_date='2026-11-01'))
     d=e.data(e.dealer)
     assert d['followups']==[], 'Dealer received internal collection notes'

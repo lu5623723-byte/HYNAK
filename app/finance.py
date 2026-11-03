@@ -2,6 +2,29 @@ from urllib.parse import urlencode
 from sqlalchemy import select
 from .core import *
 from .inventory import refresh_shipping
+from .orders import cash_pending,activate
+
+def approve_paid_cash(db,actor,o):
+    roles(actor,'finance')
+    require(cash_pending(o),'订单不在待财务审核状态',409)
+    require(o.sale_date and o.payment_at and o.total>0,'订单付款信息不完整')
+    claims=db.scalars(select(Claim).where(Claim.order_id==o.id,Claim.paid_at==o.payment_at,Claim.status=='VERIFIED')).all()
+    require(claims and all(c.attachment for c in claims),'缺少经财务核实的付款凭证')
+    receipts=db.scalars(select(Receipt).where(Receipt.claim_id.in_([c.id for c in claims]),Receipt.dealer_id==o.dealer_id).order_by(Receipt.id)).all()
+    funds=[(r,max(0,r.amount-total_sum(db,Allocation.amount,Allocation.receipt_id==r.id))) for r in receipts]
+    if sum(amount for _,amount in funds)<o.total:
+        o.status='WAITING_FINANCE_REVIEW'
+        return
+    activate(db,o,finance_verified=True)
+    remaining=o.total
+    for r,amount in funds:
+        take=min(remaining,amount)
+        if take:
+            db.add(Allocation(receipt_id=r.id,dealer_id=o.dealer_id,order_id=o.id,amount=take,actor_id=actor.id,idempotency=f'finance-cash:{o.id}:{r.id}'))
+            remaining-=take
+        if not remaining:break
+    db.flush()
+    audit(db,actor,'FINANCE_ORDER_ACTIVATE',o.id,f'version={o.version}; verified and allocated {o.total} cents')
 
 def receipt_create(db,actor,d):
     roles(actor,'admin','finance');dealer=get(db,Dealer,d['dealer_id']);account=get(db,BankAccount,d['account_id'])
@@ -9,12 +32,47 @@ def receipt_create(db,actor,d):
     ref=str(d['reference']).strip().upper();require(1<=len(ref)<=200,'请填写银行交易参考号')
     require(not db.scalar(select(Receipt).where(Receipt.account_id==account.id,Receipt.reference==ref)),'该银行交易已入账，禁止重复',409)
     cid=d.get('claim_id') or None
+    recharge=get(db,Recharge,d['recharge_id']) if d.get('recharge_id') else None
+    is_recharge=bool(d.get('is_recharge') or recharge)
+    if is_recharge:
+        require(not cid and not d.get('order_id'),'充值不能同时绑定订单付款凭证或指定订单')
+    if recharge:
+        require(recharge.dealer_id==dealer.id,'充值所属经销商不同',403)
+        require(recharge.status=='PENDING','充值申报已处理',409)
+        recharge.status='VERIFIED'
+    if is_recharge:dealer.auto_apply_credit=True
+    target=get(db,Order,d['order_id']) if d.get('order_id') else None
+    if target:
+        require(target.dealer_id==dealer.id,'到账所属经销商与订单不同',403)
+        require(target.sale_type=='CONSIGNMENT' and target.mode!='CONSIGNMENT' and target.confirmed and target.status not in ['CANCELED','REJECTED'] and db.scalar(select(Receivable.id).where(Receivable.order_id==target.id)),'请选择已生效的整单结算寄售订单',409)
     if cid:
         claim=get(db,Claim,cid);o=get(db,Order,claim.order_id)
-        require(o.dealer_id==dealer.id and claim.status=='PENDING','申报已处理或所属经销商不同',409)
+        require(target is None or target.id==o.id,'付款凭证与目标订单不一致',403)
+        require(not o.admin_review_pending,'订单须先由管理员批准自定价格或订单信息',409)
+        if o.sale_type=='CONSIGNMENT':
+            require(o.confirmed and o.status in ['CONFIRMED','PARTIALLY_SHIPPED','SHIPPED','CLOSED'] and db.scalar(select(Receivable.id).where(Receivable.order_id==o.id)),
+                    '寄售订单须先完成审批并生效，再核实和抵扣本单付款',409)
+        pending_cash=cash_pending(o)
+        require(o.dealer_id==dealer.id and claim.status=='PENDING','申报已处理或所属经销商不同；追加付款请上传新的流水凭证',409)
+        if pending_cash:
+            roles(actor,'finance')
+            require(o.payment_method=='BANK','余额付款订单请通过充值补足余额',409)
+            require(claim.paid_at==o.payment_at and claim.attachment,'付款凭证与当前订单信息不匹配，请重新上传')
         claim.status='VERIFIED'
-    r=Receipt(dealer_id=dealer.id,account_id=account.id,amount=amount,date=date_value(d['date']),reference=ref,claim_id=int(cid) if cid else None,actor_id=actor.id)
+    r=Receipt(dealer_id=dealer.id,account_id=account.id,amount=amount,date=date_value(d['date']),reference=ref,claim_id=int(cid) if cid else None,recharge_id=recharge.id if recharge else None,is_recharge=is_recharge,actor_id=actor.id)
     db.add(r);db.flush();audit(db,actor,'BANK_VERIFY',r.id,f'{amount} cents; {account.name}; {ref}')
+    if cid and pending_cash:approve_paid_cash(db,actor,o)
+    else:
+        if not target and cid and o.sale_type=='CONSIGNMENT' and o.mode!='CONSIGNMENT' and o.confirmed and o.status not in ['CANCELED','REJECTED'] and db.scalar(select(Receivable.id).where(Receivable.order_id==o.id)):
+            target=o
+        if target:
+            take=min(amount,outstanding(db,target.id))
+            if take:
+                db.add(Allocation(receipt_id=r.id,dealer_id=dealer.id,order_id=target.id,amount=take,actor_id=actor.id,idempotency=f'consignment-receipt:{r.id}:{target.id}'))
+                db.flush();refresh_shipping(db,target)
+                audit(db,actor,'RECEIPT_ALLOCATE',r.id,f'consignment order {target.id}; {take} cents')
+    from .balances import match_credit
+    match_credit(db,dealer.id,actor)
     return {'id':r.id}
 def allocate_receipt(db,actor,d):
     roles(actor,'admin','finance');did=integer(d['dealer_id']);get(db,Dealer,did)
@@ -41,6 +99,8 @@ def adjust_receivable(db,actor,d):
     require(adjusted_amount(db,o.id)+amount>=allocated(db,o.id),'冲销后应收不得低于已分配款；须先人工处理退款')
     require(not db.scalar(select(Commission).where(Commission.order_id==o.id)),'已审核佣金的订单须先人工复核佣金调整')
     db.add(Adjustment(order_id=o.id,amount=amount,reason=reason,actor_id=actor.id));audit(db,actor,'AR_ADJUST',o.id,f'{amount}; {reason}')
+    from .balances import match_credit
+    match_credit(db,o.dealer_id,actor)
     return {'ok':True}
 def due_change(db,actor,d):
     roles(actor,'admin','finance');o=order_access(db,actor,d['order_id']);reason=str(d.get('reason','')).strip();require(reason,'调整到期日须填写原因')

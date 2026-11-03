@@ -18,18 +18,23 @@ class Env:
         assert r.status_code==expected,r.text
         return r.json()
     def data(self,c=None):return (c or self.admin).get('/api/data').json()
-    def order(self,c=None,quantity=1,promotion='STANDARD',due='2026-01-01',**kw):
-        c=c or self.dealer
-        if self.data(c)['user']['role']!='dealer':
-            return self.act(c,'order.create',{'dealer_id':self.did,'due':due,'promotion':promotion,'items':[{'product_id':self.pid,'quantity':quantity}],**kw})['id']
-        self.n+=1
-        payload={'sale_type':'CASH','sale_date':due,'payment_at':due+'T12:00',
-                 'promotion':promotion,'items':[{'product_id':self.pid,'quantity':quantity}],**kw}
-        r=c.post('/api/orders',data={'payload':json.dumps(payload)},
-                 files={'file':('TEST_ONLY.pdf',b'%PDF-1.4\n% Isolated test proof, not a bank receipt.','application/pdf')},
-                 headers={'X-CSRF-Token':self.data(c)['csrf'],'Idempotency-Key':f'fixture-cash-{self.n}'})
-        assert r.status_code==200,r.text
-        return r.json()['id']
+    def legacy_order(self,c=None,quantity=1,promotion='STANDARD',due='2026-01-01',**kw):
+        """Seed pre-policy wholesale records for ledger/history regression tests.
+
+        Current cash workflows must be tested through /api/orders, not this fixture.
+        """
+        from app.db import Session
+        from app.models import User,Order
+        from app import orders
+        actor=self.data(c or self.dealer)['user']
+        did=actor['dealer_id'] if actor['role']=='dealer' else self.did
+        with Session() as db:
+            admin=db.get(User,self.data()['user']['id'])
+            oid=orders.create_order(db,admin,dict(dealer_id=did,sale_type='WHOLESALE',sale_date=due,due=due,promotion=promotion,items=[dict(product_id=self.pid,quantity=quantity)],**kw))['id']
+            o=db.get(Order,oid);o.creator_id=actor['id'];o.mode='SELF' if actor['role']=='dealer' else 'ASSISTED'
+            o.status='WAITING_INTERNAL_REVIEW' if o.mode=='SELF' else 'DRAFT'
+            db.commit()
+        return oid
     def review(self,oid,**kw):return self.act(self.admin,'order.review',{'order_id':oid,**kw})
     def receipt(self,amount='5800.00',reference=None):return self.act(self.finance,'receipt.create',{'dealer_id':self.did,'account_id':self.aid,'amount':amount,'date':'2026-10-28','reference':reference or f'BANK-{self.n}'})['id']
     def allocate(self,rid,items,**kw):return self.act(self.finance,'receipt.allocate',{'dealer_id':self.did,'receipt_id':rid,'items':items},**kw)

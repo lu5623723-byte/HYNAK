@@ -1,10 +1,30 @@
-Environment: macOS, Python 3.12.14, isolated SQLite. 2026-10-30.
-........................................................................ [ 63%]
-.........................................                                [100%]
-=============================== warnings summary ===============================
-work/venv/lib/python3.12/site-packages/fastapi/testclient.py:1
-  <test-venv>/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
-    from starlette.testclient import TestClient as TestClient  # noqa
+2026-10-31: Dealer purchase order UI and administrator-only promotion policy.
+Environment: macOS, Python 3.12, isolated SQLite.
+Full suite: 118 passed; one legacy promotion test expected dealer input validation rather than the new permission denial.
+Updated that test to verify invalid stacked promotions using the administrator account; targeted rerun passed (1 passed).
+All 119 cases now have a passing result.
+JavaScript syntax check passed. Browser verified dealer purchase title/date, read-only cash type, notes, hidden promotion and 70/30 controls, and required payment time/proof.
 
--- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-113 passed, 1 warning in 54.05s
+2026-10-31 catalog/warehouse linkage: 35 targeted tests passed (product stock and dealer account suites). Tests cover stock receipt, multiple warehouses, reservations, cancellation, consignment exclusion, negative stock, price updates and dealer data isolation. JavaScript syntax check passed.
+
+2026-10-31 dealer purchase statistics: 13 targeted tests passed. Covers monthly counts/amounts, confirmation-time filtering in America/Sao_Paulo, inclusive day/month boundaries, empty results, status/source exclusions, authenticated dealer isolation, payment-independent purchase totals and date validation. JavaScript syntax and browser date-query checks passed.
+
+2026-10-31 finance activation policy:
+- Full suite: 143 passed, 2 partial-payment tests exposed the existing one-receipt-per-proof constraint.
+- Preserved the ledger constraint: each additional transfer requires a new uploaded proof. Fixed workflow/UI/tests accordingly.
+- Follow-up finance and dealer flow checks: 11 passed; final finance checks (including an added sales legacy-type bypass test): 11 passed.
+- All 146 collected/new unique cases have a passing result across these runs.
+- Generic ledger/stock tests now explicitly seed historical WHOLESALE fixtures; current cash flows use actual multipart/API requests in test_finance_activation.py and cash/dealer suites.
+- Browser: local fictional dealer order H000006 moved from WAITING_FINANCE_REVIEW to CONFIRMED/PAID after finance verified TEST_ONLY receipt. Exactly 580000 cents allocated, outstanding 0; sales order H000007 remains pending finance.
+- JavaScript syntax and Python compile checks passed. No real bank transactions were performed.
+
+2026-10-31 sales types and custom pricing: full regression run had 163 passed and one test-fixture TypeError (duplicate items argument in the cash test helper). Replaced that test call with a real multipart request; sales-order suite rerun recorded separately. Added administrator approval gate persisted by schema version 4; no ledger reset.
+Sales-order targeted rerun: 13 passed. Across the full and targeted runs, all 164 cases have a passing result. Browser verified CASH/CONSIGNMENT/OTHER options, editable sales custom-price field, non-cash due-date fields and administrator approval notice. JavaScript syntax check passed.
+
+2026-11-01 published sales policies: 60 targeted tests passed, followed by a clean full-suite run of 180 passed. Covers administrator-only publication/editing, drafts/scheduled/expired policies, price compliance vs exceptions, automatic OTHER activation and warehouse dispatch, Demo per dealer/model including multiple models, cancellation release, concurrent duplicate requests, activation-time rechecks, and historical policy snapshots. Schema migrated to version 5 without resetting local data. Browser verified admin publication of two explicitly labeled test policies and sales Demo price preview (R6 Pro 6800 -> 5440), manual price 5000 -> admin approval. No new live purchase or bank receipt was created in the local UI check.
+
+2026-11-01 multi-SKU inventory operations: 24 targeted warehouse, batch, catalog and stock/consignment regression tests passed (20 unrelated acceptance cases deselected). Covers six stock actions, shared ledger batch, idempotency, insufficient-stock rollback, malformed/duplicate rows and role permissions. JavaScript syntax and Python compile checks passed. Browser verified two SKU rows with quantities 5/3, add/remove rows, action switching without losing rows, transfer/consignment target filtering, and hidden/disabled/non-required destination for RECEIVE. Browser examples were not submitted, so local inventory balances remain unchanged.
+
+2026-11-01 warehouse directory: 76 targeted tests passed (warehouse directory, batch stock, catalog, dealer account and sales/migration suites). Covers multiple warehouses in each tier; admin/warehouse create and edit permissions; independent locations, addresses and contacts; duplicate codes; stock preservation on editing; same-warehouse rejection; all four primary/secondary transfer combinations with multiple SKUs, idempotency and no receivable creation. Schema version 6 adds optional legacy warehouse metadata without rewriting stock. Browser verified warehouse account has separate primary/secondary creation buttons and correctly defaulted forms. No example warehouses or inventory movements were saved in the browser. JavaScript syntax and Python compile checks passed.
+
+2026-11-01 multi-SKU order entry: 41 targeted order/finance/policy tests passed, followed by a 3-case cash-order rerun after aligning the test bank date with the reported payment date. Dealer, sales and administrator multipart submissions preserve multiple SKU quantities, total payment claims, idempotency and reservations after finance verification; sales/admin non-cash types also retain multiple lines. Invalid/duplicate SKU rows reject the whole order. Browser checked all three accounts with two distinct SKUs and independent quantities, clear Add SKU labels and minimum-one-row protection. JavaScript syntax check passed. Browser examples were not submitted.

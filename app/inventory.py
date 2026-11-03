@@ -4,6 +4,22 @@ from .orders import activate
 
 def stock_move(db,actor,d):
     roles(actor,'admin','warehouse')
+    if 'items' not in d:return stock_move_item(db,actor,d)
+    items=d['items'];require(isinstance(items,list) and 1<=len(items)<=100,'请添加1至100行SKU及数量')
+    rows=[];seen=set()
+    for item in items:
+        require(isinstance(item,dict),'SKU明细格式无效')
+        pid=integer(item['product_id']);qty=integer(item['quantity'])
+        require(pid not in seen,'相同SKU请合并数量，不要重复添加')
+        get(db,Product,pid);seen.add(pid);rows.append((pid,qty))
+    # The action endpoint holds one write lock and commits only after every row succeeds.
+    batch=secrets_token()
+    for pid,qty in rows:
+        stock_move_item(db,actor,{**d,'product_id':pid,'quantity':qty},batch=batch)
+    return {'ok':True,'item_count':len(rows)}
+
+def stock_move_item(db,actor,d,*,batch=None):
+    roles(actor,'admin','warehouse')
     wid=integer(d['warehouse_id']);pid=integer(d['product_id']);qty=integer(d['quantity']);kind=d['kind'];reason=str(d.get('reason','')).strip()
     require(reason,'必须填写原因 / Motivo obrigatório')
     w=get(db,Warehouse,wid)
@@ -13,14 +29,14 @@ def stock_move(db,actor,d):
         delta=-qty if d.get('negative') else qty
         require(delta>0 or kind=='ADJUST','入库数量须为正')
         if delta<0:require(available(db,wid,pid)>=qty or actor.role=='admin' and d.get('allow_negative'),'库存被其他订单锁定')
-        stock_entry(db,actor,wid,pid,delta,kind,reason,allow_negative=bool(d.get('allow_negative')))
+        stock_entry(db,actor,wid,pid,delta,kind,reason,batch=batch,allow_negative=bool(d.get('allow_negative')))
     elif kind in ['TRANSFER','CONSIGN_SEND','CONSIGN_RETURN']:
         target=get(db,Warehouse,d['target_id']);require(target.id!=wid,'不能调拨到同一仓库')
         if kind=='TRANSFER':require(w.kind!='CONSIGNMENT' and target.kind!='CONSIGNMENT','寄售须选寄售发出/退回')
         if kind=='CONSIGN_SEND':require(w.kind!='CONSIGNMENT' and target.kind=='CONSIGNMENT','寄售地点不正确')
         if kind=='CONSIGN_RETURN':require(w.kind=='CONSIGNMENT' and target.kind!='CONSIGNMENT','退回地点不正确')
         require(available(db,wid,pid)>=qty or actor.role=='admin' and d.get('allow_negative'),'可用库存不足 / Estoque indisponível')
-        batch=secrets_token()
+        batch=batch or secrets_token()
         stock_entry(db,actor,wid,pid,-qty,kind,reason,batch=batch,allow_negative=bool(d.get('allow_negative')))
         stock_entry(db,actor,target.id,pid,qty,kind,reason,batch=batch)
     else:fail('库存动作无效')
@@ -97,18 +113,47 @@ def shipment_action(db,actor,d):
     else:fail('交付动作无效')
     db.flush();refresh_shipping(db,o);audit(db,actor,'SHIPMENT_'+action,s.id,reason)
     return {'ok':True}
+def billed_consignment_stock(db,wid,pid):
+    """Stock already billed on an original consignment order, by order."""
+    rows=db.execute(select(Order.id,func.sum(StockLedger.delta)).join(
+        StockLedger,StockLedger.order_id==Order.id).join(Receivable,Receivable.order_id==Order.id).where(
+        StockLedger.warehouse_id==wid,StockLedger.product_id==pid,
+        Order.sale_type=='CONSIGNMENT',Order.mode!='CONSIGNMENT',
+        Order.confirmed.is_not(None),Order.status.notin_(['CANCELED','REJECTED'])).group_by(Order.id)).all()
+    return {oid:qty for oid,qty in rows if qty>0}
+
+def validate_consignment_source(db,w,pid,qty,source):
+    positions=billed_consignment_stock(db,w.id,pid)
+    if source:
+        o=get(db,Order,source)
+        require(o.dealer_id==w.dealer_id and o.id in positions,'原寄售订单与该地点、车型不匹配，或可报售数量不足',409)
+        require(qty<=positions[o.id],'超出原寄售订单在该地点的库存数量',409)
+    else:
+        require(qty<=max(0,balance(db,w.id,pid)-sum(positions.values())),'此库存已按寄售订单整单记应收，请选择原寄售订单，不能再次生成应收',409)
+
 def report_consignment(db,actor,d):
     roles(actor,'admin','sales','dealer');w=get(db,Warehouse,d['warehouse_id'])
     require(w.kind=='CONSIGNMENT','不是寄售位置')
     dealer_access(db,actor,w.dealer_id);qty=integer(d['quantity']);pid=integer(d['product_id']);get(db,Product,pid)
     require(balance(db,w.id,pid)>=qty,'寄售库存不足')
-    r=ConsignmentReport(warehouse_id=w.id,product_id=pid,quantity=qty,dealer_id=w.dealer_id,idempotency=d['_operation_key'])
+    source=integer(d['source_order_id']) if d.get('source_order_id') else None
+    validate_consignment_source(db,w,pid,qty,source)
+    r=ConsignmentReport(warehouse_id=w.id,product_id=pid,quantity=qty,dealer_id=w.dealer_id,source_order_id=source,idempotency=d['_operation_key'])
     db.add(r);db.flush();audit(db,actor,'CONSIGNMENT_REPORT',r.id,qty)
     return {'id':r.id}
 def confirm_consignment(db,actor,d):
     roles(actor,'admin');r=get(db,ConsignmentReport,d['report_id'])
     if r.status=='CONFIRMED':return {'id':r.order_id,'repeated':True}
     require(balance(db,r.warehouse_id,r.product_id)>=r.quantity,'寄售库存不足')
+    w=get(db,Warehouse,r.warehouse_id)
+    validate_consignment_source(db,w,r.product_id,r.quantity,r.source_order_id)
+    if r.source_order_id:
+        o=get(db,Order,r.source_order_id)
+        require(d.get('unit_price') in [None,''],'原寄售订单已整单结算，报售不能另行改价或重复记应收')
+        stock_entry(db,actor,r.warehouse_id,r.product_id,-r.quantity,'CONSIGN_SOLD',str(d.get('reason','')).strip() or '原寄售订单报售确认',o.id)
+        r.status='CONFIRMED';r.order_id=o.id
+        audit(db,actor,'CONSIGNMENT_CONFIRM',r.id,f'original order {o.id}; stock only; receivable unchanged')
+        return {'id':o.id}
     dealer=get(db,Dealer,r.dealer_id);require(dealer.sales_id,'请先指定销售')
     p=get(db,Product,r.product_id);price=money(d.get('unit_price',str(Decimal(p.price)/100)))
     reason=str(d.get('reason','')).strip()
@@ -122,5 +167,8 @@ def confirm_consignment(db,actor,d):
     stock_entry(db,actor,r.warehouse_id,p.id,-r.quantity,'CONSIGN_SOLD',reason or '经销商售出确认',o.id)
     s=Shipment(order_id=o.id,warehouse_id=r.warehouse_id,status='DELIVERED',delivered=now(),exception='Consignment report',idempotency='consignment:'+str(r.id));db.add(s);db.flush()
     db.add(ShipmentLine(shipment_id=s.id,line_id=l.id,quantity=r.quantity))
-    r.status='CONFIRMED';r.order_id=o.id;audit(db,actor,'CONSIGNMENT_CONFIRM',r.id,f'order {o.id}')
+    r.status='CONFIRMED';r.order_id=o.id
+    from .balances import match_credit
+    match_credit(db,o.dealer_id,actor)
+    audit(db,actor,'CONSIGNMENT_CONFIRM',r.id,f'order {o.id}')
     return {'id':o.id}

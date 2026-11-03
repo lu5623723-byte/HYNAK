@@ -1,7 +1,8 @@
 <!doctype html>
+{% set ui_version=asset_version() %}
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYNAK · Business workspace</title><link rel="stylesheet" href="/static/app.css"><script defer src="/static/app.js"></script></head>
-<body data-page="{{ page }}" data-test-mode="{{ 1 if test_mode else 0 }}">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HYNAK · Business workspace</title><link rel="stylesheet" href="/static/app.css?v={{ ui_version }}"><script defer src="/static/ranking-charts.js?v={{ ui_version }}"></script><script defer src="/static/inventory-scope.js?v={{ ui_version }}"></script><script defer src="/static/session-sync.js?v={{ ui_version }}"></script><script defer src="/static/policy-assistant.js?v={{ ui_version }}"></script><script defer src="/static/smart-workbench.js?v={{ ui_version }}"></script><script defer src="/static/app.js?v={{ ui_version }}"></script></head>
+<body data-page="{{ page }}" data-test-mode="{{ 1 if test_mode else 0 }}" data-app-version="{{ ui_version }}">
 <div id="root"><div class="boot">HYNAK <span>正在载入 · Carregando…</span></div></div>
 <div id="toast" role="status" aria-live="polite"></div>
 <dialog id="modal"><div id="dialog-content"></div></dialog>

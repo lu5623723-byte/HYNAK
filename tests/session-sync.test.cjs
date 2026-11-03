@@ -1,0 +1,16 @@
+const test=require('node:test'),assert=require('node:assert/strict');
+const {create}=require('../app/static/session-sync.js');
+function setup(){let state={userId:1,view:'finance',version:'v1',hidden:false,editing:false,loading:false};const applied=[],versions=[],sessions=[],errors=[],requests=[];
+const sync=create({context:()=>({...state}),fetchSnapshot:()=>new Promise((resolve,reject)=>requests.push({resolve,reject})),applySnapshot:async d=>applied.push(d),onVersionChange:d=>versions.push(d),onSessionChange:()=>sessions.push(true),onError:e=>errors.push(e)});
+return {state,sync,applied,versions,sessions,errors,requests};}
+const data=n=>({user:{id:1},app_version:'v1',revision:n});
+test('visible accounts apply the latest shared snapshot',async()=>{const e=setup(),p=e.sync.refresh();e.requests[0].resolve(data(2));assert.deepEqual(await p,{updated:true});assert.equal(e.applied[0].revision,2)});
+test('background refresh leaves hidden pages, drafts and active loads untouched',async()=>{for(const field of ['hidden','editing','loading']){const e=setup();e.state[field]=true;const r=await e.sync.refresh();assert.ok(r.skipped);assert.equal(e.requests.length,0)}});
+test('a form opened while the request is pending retains its inputs',async()=>{const e=setup(),p=e.sync.refresh();e.state.editing=true;e.requests[0].resolve(data(2));assert.equal((await p).skipped,'deferred');assert.equal(e.applied.length,0)});
+test('navigating to another view discards the old response',async()=>{const e=setup(),p=e.sync.refresh();e.state.view='orders';e.requests[0].resolve(data(1));assert.equal((await p).skipped,'stale');assert.equal(e.applied.length,0)});
+test('an explicit page load invalidates in-flight background results',async()=>{const e=setup(),p=e.sync.refresh();e.sync.invalidate();e.requests[0].resolve(data(1));assert.equal((await p).skipped,'stale')});
+test('manual refresh supersedes a slow background response',async()=>{const e=setup(),old=e.sync.refresh(),latest=e.sync.refresh({force:true});e.requests[1].resolve(data(3));await latest;e.requests[0].resolve(data(2));await old;assert.deepEqual(e.applied.map(d=>d.revision),[3])});
+test('a new UI version triggers reload instead of applying data to old features',async()=>{const e=setup(),p=e.sync.refresh();e.requests[0].resolve({...data(2),app_version:'v2'});assert.deepEqual(await p,{versionChanged:true});assert.equal(e.versions.length,1);assert.equal(e.applied.length,0)});
+test('version refresh also waits until form editing ends',async()=>{const e=setup(),p=e.sync.refresh();e.state.editing=true;e.requests[0].resolve({...data(2),app_version:'v2'});assert.equal((await p).skipped,'deferred');assert.equal(e.versions.length,0)});
+test('a changed login session reloads without merging two users data',async()=>{const e=setup(),p=e.sync.refresh();e.requests[0].resolve({...data(2),user:{id:2}});assert.deepEqual(await p,{sessionChanged:true});assert.equal(e.sessions.length,1);assert.equal(e.applied.length,0)});
+test('errors preserve the prior snapshot and allow a later retry',async()=>{const e=setup(),p=e.sync.refresh();e.requests[0].reject(new Error('offline'));assert.ok((await p).error);assert.equal(e.applied.length,0);const next=e.sync.refresh();e.requests[1].resolve(data(4));assert.ok((await next).updated);assert.equal(e.errors.length,1)});

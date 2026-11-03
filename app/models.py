@@ -24,6 +24,7 @@ class Dealer(Base):
     phone=Column(String(30), default='')
     language=Column(String(10), default='pt')
     sales_id=Column(Integer, ForeignKey('users.id'))
+    auto_apply_credit=Column(Boolean, nullable=False, default=False, server_default='false')
     cnpj=Column(String(14))
     address_state=Column(String(2), nullable=False, default='', server_default='')
     address_city_id=Column(String(7), nullable=False, default='', server_default='')
@@ -58,6 +59,35 @@ class Warehouse(Base):
     name=Column(String(200), nullable=False)
     kind=Column(String(20), nullable=False)
     dealer_id=Column(Integer, ForeignKey('dealers.id'))
+    location=Column(String(200), nullable=False, default='', server_default='')
+    address=Column(Text, nullable=False, default='', server_default='')
+    contact=Column(String(120), nullable=False, default='', server_default='')
+    phone=Column(String(30), nullable=False, default='', server_default='')
+class SalesPolicy(Base):
+    __tablename__='sales_policies'
+    id=Column(Integer, primary_key=True)
+    name=Column(String(200), nullable=False)
+    kind=Column(String(30), nullable=False)
+    description=Column(Text, nullable=False, default='')
+    starts=Column(String(10), nullable=False)
+    ends=Column(String(10))
+    active=Column(Boolean, nullable=False, default=True)
+    creator_id=Column(Integer, ForeignKey('users.id'), nullable=False)
+    created=Column(String(40), nullable=False, default=now)
+class PolicyDraft(Base):
+    __tablename__='sales_policy_drafts'
+    id=Column(Integer, primary_key=True)
+    creator_id=Column(Integer, ForeignKey('users.id'), nullable=False)
+    idea=Column(Text, nullable=False)
+    proposal=Column(Text, nullable=False)
+    source=Column(String(20), nullable=False, default='MANUAL')
+    model=Column(String(120), nullable=False, default='')
+    version=Column(Integer, nullable=False, default=1)
+    status=Column(String(20), nullable=False, default='DRAFT')
+    review_hash=Column(String(64))
+    policy_id=Column(Integer, ForeignKey('sales_policies.id'))
+    created=Column(String(40), nullable=False, default=now)
+    updated=Column(String(40), nullable=False, default=now)
 class Order(Base):
     __tablename__='orders'
     id=Column(Integer, primary_key=True)
@@ -68,9 +98,13 @@ class Order(Base):
     sale_date=Column(String(10))
     sale_type=Column(String(20), nullable=False, default='WHOLESALE', server_default='WHOLESALE')
     payment_at=Column(String(40))
+    payment_method=Column(String(20), nullable=False, default='BANK', server_default='BANK')
     status=Column(String(40), nullable=False)
+    admin_review_pending=Column(Boolean, nullable=False, default=False, server_default='false')
     version=Column(Integer, default=1, nullable=False)
     promotion=Column(String(20), default='STANDARD')
+    policy_id=Column(Integer, ForeignKey('sales_policies.id'))
+    policy_name=Column(String(200))
     terms=Column(Text, default='')
     special_7030=Column(Boolean, default=False)
     due=Column(String(10), nullable=False)
@@ -93,6 +127,7 @@ class OrderLine(Base):
     standard_price=Column(Integer, nullable=False)
     unit_price=Column(Integer, nullable=False)
     gift=Column(Boolean, default=False, nullable=False)
+    demo_applied=Column(Boolean, default=False, nullable=False, server_default='false')
 class ConfirmationToken(Base):
     __tablename__='order_confirmation_tokens'
     hash=Column(String(64), primary_key=True)
@@ -152,6 +187,7 @@ class ConsignmentReport(Base):
     dealer_id=Column(Integer, ForeignKey('dealers.id'), nullable=False)
     status=Column(String(20), default='PENDING')
     order_id=Column(Integer, ForeignKey('orders.id'))
+    source_order_id=Column(Integer, ForeignKey('orders.id'))
     idempotency=Column(String(180), unique=True, nullable=False)
 class Receivable(Base):
     __tablename__='receivables'
@@ -177,6 +213,19 @@ class BankAccount(Base):
     id=Column(Integer, primary_key=True)
     name=Column(String(200), nullable=False, unique=True)
     aliases=Column(String(300), nullable=False, default='')
+class Recharge(Base):
+    __tablename__='dealer_recharges'
+    id=Column(Integer, primary_key=True)
+    dealer_id=Column(Integer, ForeignKey('dealers.id'), nullable=False)
+    amount=Column(Integer, nullable=False)
+    paid_date=Column(String(10), nullable=False)
+    reference=Column(String(200), nullable=False, default='')
+    attachment=Column(String(150), nullable=False)
+    media_type=Column(String(100), nullable=False)
+    status=Column(String(20), nullable=False, default='PENDING')
+    note=Column(Text, nullable=False, default='')
+    creator_id=Column(Integer, ForeignKey('users.id'), nullable=False)
+    created=Column(String(40), nullable=False, default=now)
 class Receipt(Base):
     __tablename__='bank_receipts'
     __table_args__=(UniqueConstraint('account_id','reference'),)
@@ -187,6 +236,8 @@ class Receipt(Base):
     date=Column(String(10), nullable=False)
     reference=Column(String(200), nullable=False)
     claim_id=Column(Integer, ForeignKey('payment_claims.id'), unique=True)
+    recharge_id=Column(Integer, ForeignKey('dealer_recharges.id'), unique=True)
+    is_recharge=Column(Boolean, nullable=False, default=False, server_default='false')
     actor_id=Column(Integer, ForeignKey('users.id'), nullable=False)
     created=Column(String(40), default=now)
 class Allocation(Base):

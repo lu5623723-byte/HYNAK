@@ -63,6 +63,47 @@ def migrate():
                 if column not in existing:conn.execute(text(f'ALTER TABLE dealers ADD COLUMN {column} {ddl}'))
             conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_dealers_cnpj ON dealers(cnpj)'))
             conn.execute(text('INSERT INTO schema_versions(version) VALUES (3)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=4')).first():
+            existing={c['name'] for c in inspect(conn).get_columns('orders')}
+            if 'admin_review_pending' not in existing:
+                conn.execute(text('ALTER TABLE orders ADD COLUMN admin_review_pending BOOLEAN NOT NULL DEFAULT false'))
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (4)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=5')).first():
+            existing={c['name'] for c in inspect(conn).get_columns('orders')}
+            for column,ddl in {'policy_id':'INTEGER REFERENCES sales_policies(id)','policy_name':'VARCHAR(200)'}.items():
+                if column not in existing:conn.execute(text(f'ALTER TABLE orders ADD COLUMN {column} {ddl}'))
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (5)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=6')).first():
+            existing={c['name'] for c in inspect(conn).get_columns('warehouses')}
+            for column,ddl in {'location':"VARCHAR(200) NOT NULL DEFAULT ''",'address':"TEXT NOT NULL DEFAULT ''",'contact':"VARCHAR(120) NOT NULL DEFAULT ''",'phone':"VARCHAR(30) NOT NULL DEFAULT ''"}.items():
+                if column not in existing:conn.execute(text(f'ALTER TABLE warehouses ADD COLUMN {column} {ddl}'))
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (6)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=7')).first():
+            existing={c['name'] for c in inspect(conn).get_columns('order_lines')}
+            if 'demo_applied' not in existing:
+                conn.execute(text('ALTER TABLE order_lines ADD COLUMN demo_applied BOOLEAN NOT NULL DEFAULT false'))
+            # Preserve prior Demo usage without changing historical prices.
+            conn.execute(text("UPDATE order_lines SET demo_applied=true WHERE gift=false AND order_id IN (SELECT id FROM orders WHERE promotion='DEMO')"))
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (7)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=8')).first():
+            existing={c['name'] for c in inspect(conn).get_columns('consignment_records')}
+            if 'source_order_id' not in existing:
+                conn.execute(text('ALTER TABLE consignment_records ADD COLUMN source_order_id INTEGER REFERENCES orders(id)'))
+            # Historical sold-report settlements are retained, never charged again.
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (8)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=9')).first():
+            additions={'dealers':{'auto_apply_credit':'BOOLEAN NOT NULL DEFAULT false'},
+                       'orders':{'payment_method':"VARCHAR(20) NOT NULL DEFAULT 'BANK'"},
+                       'bank_receipts':{'recharge_id':'INTEGER REFERENCES dealer_recharges(id)', 'is_recharge':'BOOLEAN NOT NULL DEFAULT false'}}
+            for table,columns in additions.items():
+                existing={c['name'] for c in inspect(conn).get_columns(table)}
+                for column,ddl in columns.items():
+                    if column not in existing:conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}'))
+            conn.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_receipt_recharge ON bank_receipts(recharge_id)'))
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (9)'))
+        if not conn.execute(text('SELECT version FROM schema_versions WHERE version=10')).first():
+            # PolicyDraft is created above by metadata.create_all; no existing ledger is modified.
+            conn.execute(text('INSERT INTO schema_versions(version) VALUES (10)'))
         if engine.dialect.name == 'sqlite':
             for table in ['stock_ledger', 'audit_logs', 'bank_receipts', 'payment_allocations', 'adjustments', 'opening_credits', 'commission_adjustments']:
                 for action in ['UPDATE', 'DELETE']:

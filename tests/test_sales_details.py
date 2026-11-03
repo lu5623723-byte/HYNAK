@@ -42,7 +42,7 @@ def test_consignment_date_and_due_are_required(env):
     o=order(e,oid)
     assert o['sale_date']=='2026-10-28' and o['sale_type']=='CONSIGNMENT'
     assert o['due']=='2026-11-28' and o['payment_at'] is None
-    assert o['receivable']==0 and e.data()['metrics']['month_sales']==0
+    assert o['receivable']==580000 and e.data()['metrics']['month_sales']==0
 
 @pytest.mark.parametrize('change,proof',[
     ({'payment_at':''},PROOF), ({'payment_at':'2026-99-01T14:00'},PROOF),
@@ -67,8 +67,9 @@ def test_cash_order_proof_is_atomic_private_and_not_verified_receipt(env):
     assert e.data()['metrics']['verified']==0 and o['receivable']==0
     assert e.dealer.get(f'/api/claims/{cid}/attachment').content==PROOF
     assert e.dealer2.get(f'/api/claims/{cid}/attachment').status_code==403
-    e.review(oid)
-    assert order(e,oid)['receivable']==580000 and e.data()['metrics']['verified']==0
+    e.act(e.admin,'order.review',dict(order_id=oid),expected=403)
+    e.act(e.finance,'receipt.create',dict(dealer_id=e.did,account_id=e.aid,claim_id=cid,amount='5800.00',date='2026-10-28',reference='FULL-CASH-PAYMENT'))
+    assert order(e,oid)['receivable']==580000 and order(e,oid)['outstanding']==0 and e.data()['metrics']['verified']==580000
     raw=e.dealer.get('/api/export/orders').content
     wb=load_workbook(io.BytesIO(raw));values=list(wb.active.values)
     assert 'sale_date' in values[0] and 'sale_type' in values[0] and 'payment_at' in values[0]
@@ -95,14 +96,13 @@ def test_database_failure_rolls_back_order_and_uploaded_file(env):
 def test_revised_cash_time_needs_new_proof_and_revokes_quote(env):
     e=env;r=post_order(e,payload(e,'CASH'),PROOF,client=e.sales)
     assert r.status_code==200,r.text
-    oid=r.json()['id'];e.act(e.sales,'order.submit',{'order_id':oid});e.review(oid)
-    token=e.act(e.sales,'order.token',{'order_id':oid})['token']
+    oid=r.json()['id']
+    assert order(e,oid)['status']=='WAITING_FINANCE_REVIEW'
+    e.act(e.sales,'order.token',{'order_id':oid},expected=403)
     d=payload(e,'CASH');d.update(reason='Correction of reported payment time',payment_at='2026-10-29T10:45')
     assert post_order(e,d,client=e.admin,oid=oid,key='cash-revision-no-proof').status_code==400
-    assert e.dealer.get('/api/quote/'+token).status_code==200
     r=post_order(e,d,PROOF+b'new-proof',client=e.admin,oid=oid,key='cash-revision-new-proof')
     assert r.status_code==200,r.text
-    assert e.dealer.get('/api/quote/'+token).status_code==410
     assert order(e,oid)['version']==2 and order(e,oid)['payment_at']=='2026-10-29T10:45:00-03:00'
     claims=e.data()['claims'];assert sorted(c['status'] for c in claims)==['PENDING','SUPERSEDED']
 
@@ -113,18 +113,18 @@ def test_consignment_dispatch_and_cancel_preserve_hynak_stock(env):
     sid=e.ship(oid,consignment_location_id=e.cwid)
     with Session() as db:
         assert balance(db,e.wid,e.pid)==9 and balance(db,e.cwid,e.pid)==1
-        assert db.scalar(select(func.count(Receivable.id)))==0
+        assert db.scalar(select(func.count(Receivable.id)))==1
     e.act(e.warehouse,'shipment.action',{'shipment_id':sid,'action':'CANCEL','reason':'Not picked up'})
     with Session() as db:assert balance(db,e.wid,e.pid)==10 and balance(db,e.cwid,e.pid)==0
     assert not order(e,oid)['commission_eligible']
 
-def test_consignment_only_confirmed_sold_units_create_receivable(env):
+def test_consignment_sold_report_does_not_duplicate_original_receivable(env):
     e=env;e.stock(5);oid=post_order(e,payload(e)).json()['id'];approve_consignment(e,oid)
     sid=e.ship(oid,consignment_location_id=e.cwid)
     e.act(e.warehouse,'shipment.action',{'shipment_id':sid,'action':'DELIVER'})
-    report=e.act(e.dealer,'consignment.report',{'warehouse_id':e.cwid,'product_id':e.pid,'quantity':1})['id']
+    report=e.act(e.dealer,'consignment.report',{'source_order_id':oid,'warehouse_id':e.cwid,'product_id':e.pid,'quantity':1})['id']
     sold=e.act(e.admin,'consignment.confirm',{'report_id':report,'due':'2026-11-28'})['id']
-    assert order(e,oid)['receivable']==0 and order(e,sold)['receivable']==580000
+    assert sold==oid and order(e,oid)['receivable']==580000
     assert e.data()['metrics']['receivable']==580000
 
 def test_legacy_migration_preserves_orders_and_is_repeatable(tmp_path):

@@ -1,4 +1,4 @@
-"""Latest business policy: dealers pay cash; administrators create consignments."""
+"""Latest business policy: dealers pay cash; sales consignments require finance review."""
 import json
 import os
 from pathlib import Path
@@ -20,9 +20,9 @@ def post(e,client,payload,key='cash-only-form',proof=None):
                        files={'file':('test.pdf',proof,'application/pdf')} if proof is not None else None,
                        headers={'X-CSRF-Token':e.data(client)['csrf'],'Idempotency-Key':key})
 
-@pytest.mark.parametrize('role',['dealer','sales','finance','warehouse'])
+@pytest.mark.parametrize('role',['dealer','finance','warehouse'])
 @pytest.mark.parametrize('endpoint',['json','form'])
-def test_only_administrator_can_create_consignment(env,role,endpoint):
+def test_dealer_and_non_order_roles_cannot_create_consignment(env,role,endpoint):
     e=env;client=getattr(e,role);payload=data(e,'CONSIGNMENT')
     files=set((DATA_DIR/'attachments').iterdir())
     if endpoint=='json':e.act(client,'order.create',payload,expected=403)
@@ -30,7 +30,7 @@ def test_only_administrator_can_create_consignment(env,role,endpoint):
     assert e.data()['orders']==[] and e.data()['claims']==[]
     assert set((DATA_DIR/'attachments').iterdir())==files
 
-@pytest.mark.parametrize('kind',['WHOLESALE',None,'CONSIGNMENT'])
+@pytest.mark.parametrize('kind',['WHOLESALE',None,'CONSIGNMENT','OTHER'])
 def test_dealer_cannot_use_legacy_or_missing_type_to_bypass_cash(env,kind):
     e=env;payload=data(e)
     if kind is None:payload.pop('sale_type')
@@ -49,7 +49,7 @@ def test_dealer_cash_requires_time_and_real_upload_and_remains_unverified(env):
     assert response.status_code==200,response.text
     own=e.data(e.dealer)
     assert own['orders'][0]['sale_type']=='CASH'
-    assert own['orders'][0]['mode']=='SELF' and own['orders'][0]['status']=='WAITING_INTERNAL_REVIEW'
+    assert own['orders'][0]['mode']=='SELF' and own['orders'][0]['status']=='WAITING_FINANCE_REVIEW'
     assert own['claims'][0]['status']=='PENDING' and own['metrics']['verified']==0
     # A cash request replay is still safe and creates neither a second order nor proof.
     again=post(e,e.dealer,payload,proof=PROOF)
@@ -88,3 +88,28 @@ with Session() as db:
  assert db.scalar(select(func.count(Receipt.id)))==0
 '''
     subprocess.run([sys.executable,'-c',code],env={**os.environ,'HYNAK_DATA_DIR':str(tmp_path/'new-demo'),'PYTHONPATH':str(Path(__file__).resolve().parents[1])},check=True)
+
+@pytest.mark.parametrize('role',['dealer','sales'])
+@pytest.mark.parametrize('promotion',['DEMO','TEN_PLUS_ONE'])
+def test_only_admin_selects_promotions_on_both_endpoints(env,role,promotion):
+    e=env;payload={**data(e),'promotion':promotion,'role':'admin'}
+    client=getattr(e,role)
+    e.act(client,'order.create',payload,expected=403)
+    assert post(e,client,payload,proof=PROOF).status_code==403
+    assert e.data()['orders']==[] and e.data()['claims']==[]
+
+def test_dealer_cannot_restore_removed_payment_terms(env):
+    e=env;payload={**data(e),'special_7030':True}
+    e.act(e.dealer,'order.create',payload,expected=403)
+    assert post(e,e.dealer,payload,proof=PROOF).status_code==403
+    assert e.data()['orders']==[]
+
+def test_admin_can_apply_promotion_to_dealer_purchase(env):
+    e=env;payload={**data(e),'terms':'Dealer purchase note'}
+    response=post(e,e.dealer,payload,proof=PROOF)
+    assert response.status_code==200,response.text
+    oid=response.json()['id']
+    e.act(e.admin,'order.revise',dict(order_id=oid,promotion='DEMO',reason='Approved promotion',items=payload['items']))
+    order=e.data(e.dealer)['orders'][0]
+    assert order['promotion']=='DEMO' and order['total']==464000
+    assert order['terms']=='Dealer purchase note'

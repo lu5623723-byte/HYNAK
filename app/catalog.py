@@ -24,6 +24,7 @@ def save_user(db,actor,d):
     return {'id':u.id}
 def save_dealer(db,actor,d):
     roles(actor,'admin');obj=get(db,Dealer,d['id']) if d.get('id') else Dealer()
+    require(not any(k in d for k in ['credit_rating','credit_score','rating','rating_score']),'信用评级由系统自动计算，不能人工填写或修改')
     cnpj=normalize_cnpj(d.get('cnpj',obj.cnpj))
     if cnpj:
         duplicate=db.scalar(select(Dealer.id).where(Dealer.cnpj==cnpj,Dealer.id!=obj.id))
@@ -44,11 +45,26 @@ def save_product(db,actor,d):
     p.price=money(d['price']);p.active=bool(d.get('active',True));db.add(p);db.flush();audit(db,actor,'PRODUCT_SAVE',p.id,f'{p.sku}; cents={p.price}')
     return {'id':p.id}
 def save_warehouse(db,actor,d):
-    roles(actor,'admin');kind=d['kind'];require(kind in ['PRIMARY','SECONDARY','CONSIGNMENT'],'地点类型无效')
-    w=Warehouse(code=str(d['code']).strip(),name=str(d['name']).strip(),kind=kind)
-    require(w.code and w.name,'代码和名称不能为空')
-    if kind=='CONSIGNMENT':w.dealer_id=get(db,Dealer,d['dealer_id']).id
-    db.add(w);db.flush();audit(db,actor,'WAREHOUSE_CREATE',w.id,w.name)
+    roles(actor,'admin','warehouse')
+    w=get(db,Warehouse,d['id']) if d.get('id') else Warehouse()
+    existing=bool(w.id);kind=d.get('kind',w.kind)
+    require(kind in ['PRIMARY','SECONDARY','CONSIGNMENT'],'仓库类型无效')
+    if existing:require(kind==w.kind,'已有仓库不能切换类型，请新增对应类型的仓库',409)
+    code=str(d.get('code',w.code or '')).strip();name=str(d.get('name',w.name or '')).strip()
+    require(1<=len(code)<=100 and 1<=len(name)<=200,'请填写有效仓库代码及名称')
+    require(not db.scalar(select(Warehouse.id).where(func.lower(Warehouse.code)==code.lower(),Warehouse.id!=w.id)),'仓库代码已存在，请使用不同代码',409)
+    w.code=code;w.name=name;w.kind=kind
+    if kind=='CONSIGNMENT':
+        did=get(db,Dealer,d.get('dealer_id',w.dealer_id)).id
+        if existing:require(did==w.dealer_id,'已有寄售地点不能改为其他经销商',409)
+        w.dealer_id=did
+    else:require(not d.get('dealer_id'),'一级、二级仓库不关联经销商')
+    for field,maximum in [('location',200),('address',2000),('contact',120),('phone',30)]:
+        value=str(d.get(field,getattr(w,field) or '')).strip()
+        require(len(value)<=maximum,'仓库信息过长：'+field)
+        if field=='location' and field in d:require(value,'请填写仓库地点 / 城市')
+        setattr(w,field,value)
+    db.add(w);db.flush();audit(db,actor,'WAREHOUSE_UPDATE' if existing else 'WAREHOUSE_CREATE',w.id,f'{w.code}; {w.name}; {w.kind}; {w.location}; {w.address}; {w.contact}; {w.phone}')
     return {'id':w.id}
 def save_account(db,actor,d):
     roles(actor,'admin','finance');name=str(d['name']).strip();require(name,'收款账户名称不能为空')

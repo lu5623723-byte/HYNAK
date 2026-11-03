@@ -43,11 +43,8 @@ def seed_demo():
             save_claim(db,actor,order,proof,order.total,paid_date,order.payment_at,'TEST_ONLY_NOT_A_BANK_RECEIPT')
             return oid
         create(dealer, 2)  # Ready for the administrator's review.
-        confirmed = create(dealer, 1, 'DEMO', (today()-timedelta(days=5)).isoformat())
-        orders.review_order(db, admin, dict(order_id=confirmed))
-        assisted = create(sales, 10, 'TEN_PLUS_ONE')
-        orders.submit_order(db, sales, dict(order_id=assisted))
-        orders.review_order(db, admin, dict(order_id=assisted))
+        confirmed = create(dealer, 1, due=(today()-timedelta(days=5)).isoformat())
+        assisted = create(sales, 10)
         create(sales, 3)  # Draft ready to submit.
         inventory.stock_move(db, admin, dict(kind='CONSIGN_SEND', warehouse_id=primary, target_id=consign, product_id=products[1], quantity=10, reason='测试寄售发出，不产生应收'))
         inventory.report_consignment(db, dealer, dict(warehouse_id=consign, product_id=products[1], quantity=3, _operation_key='demo-consignment-report'))
